@@ -1,0 +1,30 @@
+[Unit]
+Description=Transient boot-window CPU boost for the OpenShift control plane
+Documentation=file:///usr/local/share/doc/platform-cpu-boost.md
+# Needs kubelet's CPU Manager state file and crictl, so it cannot run before
+# kubelet. That is fine: the contention it targets is pod bring-up, which by
+# definition happens after kubelet starts. It boosts within a second or two of
+# kubelet coming up and releases once bring-up converges.
+After=kubelet.service crio.service
+Wants=kubelet.service
+ConditionPathExists=/proc/cmdline
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/sysconfig/platform-cpu-boost
+# Clear the inherited workload-partitioning affinity for THIS unit only, so
+# the boost daemon itself is not competing for the reserved CPUs it is trying
+# to relieve. The script does its own work via taskset/cpuset on other PIDs.
+CPUAffinity=
+Nice=-5
+ExecStart=/usr/local/bin/platform-cpu-boost.sh daemon
+# Always hand the CPUs back, even on crash or shutdown. Releasing is a pure
+# cpuset narrow, which cannot fail the way widening can.
+ExecStopPost=/usr/local/bin/platform-cpu-boost.sh release
+# Hard ceiling: the script has its own MAX_BOOST_SEC, this is the backstop.
+RuntimeMaxSec=2400
+TimeoutStopSec=60
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

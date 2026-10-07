@@ -1,0 +1,4 @@
+# Collected data from runs
+run-*/
+*.tar.xz
+*.gz

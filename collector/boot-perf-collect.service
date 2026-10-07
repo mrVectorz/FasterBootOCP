@@ -1,0 +1,31 @@
+[Unit]
+Description=Early-boot performance collector (SNO reserved-CPU contention)
+Documentation=https://access.redhat.com/solutions/
+# Start before the two services whose contention we are measuring, so the
+# first sample predates any container work. local-fs is needed for /var/log.
+DefaultDependencies=no
+After=local-fs.target systemd-journald.service
+Before=crio.service kubelet.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+# The collector must not live in the reserved pool. Workload partitioning
+# applies a global systemd CPUAffinity; this overrides it for this unit only.
+# The script narrows further with taskset once it can read the isolated set.
+CPUAffinity=
+Nice=10
+IOSchedulingClass=idle
+Environment=BOOT_PERF_INTERVAL=1
+Environment=BOOT_PERF_SLOW_EVERY=15
+Environment=BOOT_PERF_DURATION=2700
+ExecStart=/usr/local/bin/boot-perf-collect.sh
+# Hard ceiling so a wedged collector never outlives the boot window.
+RuntimeMaxSec=3000
+TimeoutStopSec=120
+Restart=no
+# Keep the collector itself out of the cgroup it is measuring.
+Slice=boot-perf.slice
+
+[Install]
+WantedBy=multi-user.target

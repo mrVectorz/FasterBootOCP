@@ -1,0 +1,40 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: boot-perf-density
+  labels:
+    # Plain workload namespace on purpose: these must NOT carry the
+    # management annotation, so they land on the isolated pool exactly like
+    # a latency-sensitive CNF workload would. The contention under test is the platform
+    # work of *creating* them, not the pods' own CPU use.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: density
+  namespace: boot-perf-density
+spec:
+  replicas: 0
+  selector:
+    matchLabels: {app: density}
+  template:
+    metadata:
+      labels: {app: density}
+    spec:
+      terminationGracePeriodSeconds: 0
+      # Spread across the node rather than piling onto one NUMA node.
+      containers:
+        - name: idle
+          # Pre-pull this on the node so the test measures pod-creation work
+          # rather than registry throughput -- which matches a reboot, where
+          # images are already local.
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sleep", "infinity"]
+          resources:
+            requests: {cpu: 1m, memory: 16Mi}
+            limits: {memory: 64Mi}

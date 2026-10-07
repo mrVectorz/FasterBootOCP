@@ -1,0 +1,11 @@
+[Unit]
+Description=Slice for the early-boot performance collector
+Before=slices.target
+DefaultDependencies=no
+
+[Slice]
+# Accounting on, no limits: we want this slice's own cost visible in the data
+# so its overhead can be subtracted from the platform totals.
+CPUAccounting=yes
+MemoryAccounting=yes
+IOAccounting=yes
