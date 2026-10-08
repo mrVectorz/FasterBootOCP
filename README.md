@@ -35,9 +35,38 @@ reserved pool while keeping a small one at steady state.
 
 ## Does the workaround actually help?
 
-**Only when the reserved pool is genuinely saturated.** Measured on a lab SNO
-(288 CPUs, no SMT, 487 pods, identical procedure, varying only the reserved
-CPU count):
+**Yes, when the reserved pool is genuinely saturated — validated on a
+production-representative deployment.**
+
+On a 2-socket 80-CPU SNO with 8 reserved CPUs (hyperthread siblings, so 4
+physical cores) running ~504 real CNF pods, two baseline boots and one
+boosted boot:
+
+| metric | baseline (2 runs) | boosted | change |
+|---|---|---|---|
+| rho | 0.90 / 0.90 | **0.76** | **-16%** |
+| intervals >=90% busy | 62.1% / 61.7% | **19.9%** | **-68%** |
+| run-queue wait mean | 388 / 393 us | **195 us** | **-50%** |
+| pods ready p50 | 869 / 796 s | **609 s** | **-27%** |
+| pods ready p99 | 2080 / 1788 s | **1301 s** | **-33%** |
+
+In wall-clock terms: **p50 13.9 -> 10.2 min, p99 32.2 -> 21.7 min — about 10
+minutes off the tail.**
+
+The CPU-side metrics are highly reproducible (rho identical across baselines,
+run-queue wait within 1.2%). Pod-readiness tails are noisier — p90 varied 20%
+between the two baselines — so a conservative reading, comparing against the
+*better* baseline, still gives p50 -23% and p99 -27%.
+
+**Real workloads benefit roughly twice as much as synthetic ones** (-33% vs
+-19% at comparable rho), presumably because real pods are far more expensive
+for kubelet and CRI-O to start, so more of the critical path is the platform
+CPU work the boost relieves.
+
+### The rho threshold, from lab A/B
+
+Measured on a lab SNO (288 CPUs, no SMT, 487 synthetic pods, identical
+procedure, varying only the reserved CPU count):
 
 | reserved CPUs | rho without boost | pods ready p99: without -> with boost | verdict |
 |---|---|---|---|
@@ -56,7 +85,8 @@ In the saturated case it is a good trade:
 boost recovered the boot performance of the larger pool.**
 
 So: **measure rho first.** The collector reports it directly. Below ~0.85 the
-workaround is not worth deploying. At or above ~0.9 it is.
+workaround is not worth deploying and may cost a few percent. At or above
+~0.9 it is clearly worth it.
 
 ### "8 reserved CPUs" does not mean the same thing on every machine
 
@@ -92,10 +122,14 @@ decide whether CPU is the problem will tell you it is not.
 
 - Validated on OCP 4.20 and 4.22 SNO with `cpuPartitioning: AllNodes` and a
   PerformanceProfile.
-- The lab workload is synthetic -- one container running `sleep`, no PVCs,
-  probes, init containers or additional network attachments. Real CNF pods are
-  considerably more expensive to start, which should push rho up and make the
-  saturated case more likely, but this is untested.
+- The rho-threshold A/B used a synthetic workload (one container running
+  `sleep`, no PVCs, probes or extra network attachments). The headline results
+  above are from a real CNF deployment, which benefited about twice as much.
+- In the validated run the boost was only **partially** applied: `kubelet` and
+  `crio` were widened but the control-plane static pods were not. Check
+  `journalctl -u platform-cpu-boost -b -o cat | grep applied` reports a
+  non-zero pod-cgroup count — if it says `0 pod cgroups`, there is more
+  benefit still on the table.
 - The workaround deliberately does **not** touch `ovs-vswitchd` or
   `ovsdb-server`; ovn-kubernetes manages those dynamically and interfering
   with them wedged ovsdb in testing.
