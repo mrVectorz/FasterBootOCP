@@ -89,6 +89,8 @@ set -u
 CG=/sys/fs/cgroup
 STATE_FILE=/var/lib/kubelet/cpu_manager_state
 RUNSTATE=/run/platform-cpu-boost.state
+NORM_TARGET=""   # kernel-normalised spelling of the active target, learned lazily
+NORM_FOR=""      # which target NORM_TARGET corresponds to
 
 MAX_PLATFORM_CPUS="${MAX_PLATFORM_CPUS:-32}"   # see GOTCHA 1; do not exceed 32
 POLL_SEC="${POLL_SEC:-2}"                      # see GOTCHA 2; lower = safer
@@ -190,7 +192,7 @@ compute_target() {
 }
 
 apply_set() { # apply_set <cpuset>
-  local target="$1" s f cur n=0 w=0 failed=0 pid prev
+  local target="$1" s f cur n=0 w=0 skipped=0 pid prev
   prev="$(cat "$RUNSTATE" 2>/dev/null || echo "$RESERVED")"
 
   # 1. Slice cpusets FIRST -- taskset is clamped to the cpuset, so setting the
@@ -205,17 +207,33 @@ apply_set() { # apply_set <cpuset>
   #    live. These carry no inherited user mask, so a cpuset write alone moves
   #    them. Only touch cgroups currently at the reserved set or the previous
   #    target, so CPU Manager exclusive allocations are never rewritten.
+  # Invalidate the learned normalisation if the target changed.
+  [[ "$NORM_FOR" == "$target" ]] || { NORM_FOR="$target"; NORM_TARGET=""; }
+
   while IFS= read -r f; do
-    # NOT $(< "$f" 2>/dev/null): adding a redirection defeats bash's special
-    # $(< file) form, turning it into a command substitution around a null
-    # command that ALWAYS yields the empty string. That silently skipped every
-    # cgroup -- the boost logged "0 pod cgroups" on every run and never
-    # widened kube-apiserver or etcd.
-    read -r cur < "$f" 2>/dev/null || continue
+    # Braces around the redirection: `read -r cur < "$f" 2>/dev/null` applies
+    # redirections LEFT TO RIGHT, so a missing file is reported to the still
+    # un-redirected stderr before 2>/dev/null takes effect. On a booting node
+    # cgroups vanish between the find and the read constantly, which spammed
+    # the journal with hundreds of "No such file or directory" lines.
+    { read -r cur < "$f"; } 2>/dev/null || continue
     [[ -n "$cur" ]] || continue
+
+    # Fast path. The kernel normalises cpuset strings, so once we have learned
+    # the normalised form of the target, almost every file matches it as a
+    # plain string on subsequent passes and costs nothing. Without this the
+    # set comparison forks two subshells per file per pass -- with ~1000
+    # cgroups and a pass every 15 s that measured 23 min of CPU over a 26 min
+    # boost window, nearly a full core.
+    [[ -n "$NORM_TARGET" && "$cur" == "$NORM_TARGET" ]] && continue
+
     if same_set "$cur" "$RESERVED" || same_set "$cur" "$prev"; then
-      if echo "$target" > "$f" 2>/dev/null; then ((n++)); else
-        ((failed++)); (( failed <= 3 )) && log "WRITE FAILED: ${f#$CG/} (cur=$cur)"
+      if { echo "$target" > "$f"; } 2>/dev/null; then
+        ((n++))
+        # Learn the kernel's normalised spelling from the first write.
+        [[ -n "$NORM_TARGET" ]] || { read -r NORM_TARGET < "$f"; } 2>/dev/null
+      else
+        ((skipped++))
       fi
     fi
   done < <(find "$CG/kubepods.slice" -name cpuset.cpus 2>/dev/null)
@@ -228,7 +246,9 @@ apply_set() { # apply_set <cpuset>
     done < <(pgrep -x "$s" 2>/dev/null)
   done
 
-  log "applied [$target]: $n pod cgroups, $w daemons$( ((failed)) && echo ", $failed FAILED")"
+  # "vanished" are cgroups that disappeared between the find and the write --
+  # normal churn on a booting node, not an error.
+  log "applied [$target]: $n pod cgroups, $w daemons$( ((skipped)) && echo " (${skipped} vanished)")"
   if same_set "$target" "$RESERVED"; then rm -f "$RUNSTATE"; else echo "$target" > "$RUNSTATE"; fi
 }
 
@@ -343,6 +363,12 @@ case "${1:-show}" in
   show)    cmd_show ;;
   once)    t="$(compute_target)" && apply_set "$t"; cmd_show ;;
   daemon)  cmd_daemon ;;
-  release) apply_set "$RESERVED"; cmd_show ;;
+  release)
+    # ExecStopPost re-runs this after the daemon has already released on exit.
+    # Without this guard the second invocation walks ~1000 cgroups again and
+    # blew through TimeoutStopSec, leaving the unit "failed" with orphaned
+    # processes. No state file means there is nothing to undo.
+    if [[ -r "$RUNSTATE" ]]; then apply_set "$RESERVED"; else
+      log "no boost state; release is a no-op"; fi ;;
   *) echo "usage: $0 {show|once|daemon|release}" >&2; exit 2 ;;
 esac

@@ -18,12 +18,18 @@ EnvironmentFile=-/etc/sysconfig/platform-cpu-boost
 CPUAffinity=
 Nice=-5
 ExecStart=/usr/local/bin/platform-cpu-boost.sh daemon
-# Always hand the CPUs back, even on crash or shutdown. Releasing is a pure
-# cpuset narrow, which cannot fail the way widening can.
+# Safety net for a crash or an abrupt stop. On a clean exit the daemon has
+# already released, and the script's own guard makes this a no-op -- without
+# that guard the second full walk of ~1000 cgroups overran TimeoutStopSec and
+# left the unit "failed" with orphaned processes.
 ExecStopPost=/usr/local/bin/platform-cpu-boost.sh release
 # Hard ceiling: the script has its own MAX_BOOST_SEC, this is the backstop.
 RuntimeMaxSec=2400
-TimeoutStopSec=60
+# Releasing ~1000 pod cgroups measured ~80 s on a busy node, so 60 s was not
+# enough even for the legitimate path. KillMode=mixed so a timeout kills the
+# whole group rather than leaving stragglers behind.
+TimeoutStopSec=300
+KillMode=mixed
 Restart=no
 
 [Install]
