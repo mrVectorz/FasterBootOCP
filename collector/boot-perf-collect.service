@@ -23,6 +23,11 @@ ExecStart=/usr/local/bin/boot-perf-collect.sh
 # Hard ceiling so a wedged collector never outlives the boot window.
 RuntimeMaxSec=3000
 TimeoutStopSec=120
+# Stopping the collector early to flush its data is a documented, normal
+# operation (see the MoP). Belt and braces with the script's explicit exit 0
+# so that neither a SIGTERM nor RuntimeMaxSec expiry leaves the unit showing
+# as "failed", which looks alarming and generates needless questions.
+SuccessExitStatus=143 SIGTERM
 Restart=no
 # Keep the collector itself out of the cgroup it is measuring.
 Slice=boot-perf.slice

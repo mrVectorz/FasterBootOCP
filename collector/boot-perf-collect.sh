@@ -302,3 +302,8 @@ FAST_PID=$!
 slow &
 SLOW_PID=$!
 wait "$FAST_PID" "$SLOW_PID"
+# Exit 0 explicitly. The documented way to flush early is `systemctl stop`,
+# which SIGTERMs us; `wait` then returns 128+15 and the EXIT trap would carry
+# that out as the script's status, leaving the unit in "failed" state after a
+# perfectly normal operator action. RuntimeMaxSec expiry has the same effect.
+exit 0
