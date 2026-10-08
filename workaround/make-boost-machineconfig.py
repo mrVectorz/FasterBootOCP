@@ -21,9 +21,29 @@ Manager has not yet claimed them.
 """
 import argparse
 import base64
+import gzip
+import io
 import pathlib
 
 HERE = pathlib.Path(__file__).resolve().parent
+
+def b64gz(data):
+    """Ignition `compression: gzip` payload.
+
+    The scripts are several hundred lines each and plain base64 inflates them
+    by a third; gzip first cuts the embedded blob by roughly 4x, which keeps
+    the generated MachineConfig reviewable.
+
+    mtime=0 and a fixed compresslevel make the output byte-for-byte
+    deterministic, so regenerating an unchanged source produces no diff.
+    """
+    if isinstance(data, str):
+        data = data.encode()
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as fh:
+        fh.write(data)
+    return "data:text/plain;charset=utf-8;base64," + base64.b64encode(buf.getvalue()).decode()
+
 ap = argparse.ArgumentParser()
 ap.add_argument("--role", default="master")
 ap.add_argument("--enabled", default="true", choices=["true", "false"])
@@ -61,10 +81,7 @@ STATE_WAIT_SEC=120
 """
 
 
-def b64(data):
-    if isinstance(data, str):
-        data = data.encode()
-    return "data:text/plain;charset=utf-8;base64," + base64.b64encode(data).decode()
+
 
 
 def ind(text, n):
@@ -72,8 +89,8 @@ def ind(text, n):
     return "\n".join(pad + ln if ln else "" for ln in text.splitlines())
 
 
-script = b64((HERE / "platform-cpu-boost.sh").read_bytes())
-envf = b64(ENVFILE)
+script = b64gz((HERE / "platform-cpu-boost.sh").read_bytes())
+envf = b64gz(ENVFILE)
 unit = (HERE / "platform-cpu-boost.service").read_text()
 
 print(f"""---
@@ -85,9 +102,9 @@ print(f"""---
 #
 # Does NOT change reservedSystemCPUs: node allocatable and the CPU Manager
 # state file are untouched, so no Guaranteed pod is restarted.
-# Does NOT touch ovs-vswitchd/ovsdb-server: on 4.21.z+ ovn-kubernetes manages
-# those dynamically via the kubelet PodResource API, and interfering
-# wedges ovsdb.
+# Does NOT touch ovs-vswitchd/ovsdb-server: on recent releases ovn-kubernetes
+# manages those dynamically via the kubelet PodResource API, and interfering
+# with them wedges ovsdb.
 apiVersion: machineconfiguration.openshift.io/v1
 kind: MachineConfig
 metadata:
@@ -104,11 +121,13 @@ spec:
           mode: 0755
           overwrite: true
           contents:
+            compression: gzip
             source: {script}
         - path: /etc/sysconfig/platform-cpu-boost
           mode: 0644
           overwrite: true
           contents:
+            compression: gzip
             source: {envf}
     systemd:
       units:

@@ -9,16 +9,35 @@ edit to boot-perf-collect.sh.
   oc apply -f 99-boot-perf-collector.yaml
 """
 import base64
+import gzip
+import io
 import pathlib
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
+
+def b64gz(data):
+    """Ignition `compression: gzip` payload.
+
+    The scripts are several hundred lines each and plain base64 inflates them
+    by a third; gzip first cuts the embedded blob by roughly 4x, which keeps
+    the generated MachineConfig reviewable.
+
+    mtime=0 and a fixed compresslevel make the output byte-for-byte
+    deterministic, so regenerating an unchanged source produces no diff.
+    """
+    if isinstance(data, str):
+        data = data.encode()
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as fh:
+        fh.write(data)
+    return "data:text/plain;charset=utf-8;base64," + base64.b64encode(buf.getvalue()).decode()
+
 ROLE = sys.argv[1] if len(sys.argv) > 1 else "master"
 
 
 def inline(path):
-    b = (HERE / path).read_bytes()
-    return "data:text/plain;charset=utf-8;base64," + base64.b64encode(b).decode()
+    return b64gz((HERE / path).read_bytes())
 
 
 def unit(name):
@@ -58,6 +77,7 @@ spec:
           mode: 0755
           overwrite: true
           contents:
+            compression: gzip
             source: {script}
     systemd:
       units:
