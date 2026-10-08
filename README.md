@@ -35,43 +35,45 @@ reserved pool while keeping a small one at steady state.
 
 ## Does the workaround actually help?
 
-**Yes, when the reserved pool is genuinely saturated — validated on a
-production-representative deployment.**
+**Only when the reserved CPU pool is genuinely saturated.** Two test
+environments, both with synthetic workloads, give a consistent picture.
 
-On a 2-socket 80-CPU SNO with 8 reserved CPUs (hyperthread siblings, so 4
-physical cores) running ~504 real CNF pods, two baseline boots and one
-boosted boot:
+### Environment A -- CNF-like pods, ~500 pods, 8 reserved CPUs
 
-| metric | baseline (2 runs) | boosted | change |
+A 2-socket 80-CPU host where the 8 reserved CPUs are hyperthread siblings,
+so really 4 physical cores. Synthetic CNF-like pods (multiple containers,
+persistent volumes, probes). Two baseline boots, one boosted boot:
+
+| metric | baseline | boosted | change |
 |---|---|---|---|
-| rho | 0.90 / 0.90 | **0.76** | **-16%** |
-| intervals >=90% busy | 62.1% / 61.7% | **19.9%** | **-68%** |
-| run-queue wait mean | 388 / 393 us | **195 us** | **-50%** |
-| pods ready p50 | 869 / 796 s | **609 s** | **-27%** |
-| pods ready p99 | 2080 / 1788 s | **1301 s** | **-33%** |
+| rho | ~0.90 | ~0.76 | ~-15% |
+| intervals >=90% busy | ~62% | ~20% | ~-65% |
+| run-queue wait mean | ~390 us | ~195 us | ~-50% |
+| pods ready p50 | ~830 s | ~610 s | **~-25%** |
+| pods ready p99 | ~1900 s | ~1300 s | **~-30%** |
 
-In wall-clock terms: **p50 13.9 -> 10.2 min, p99 32.2 -> 21.7 min — about 10
-minutes off the tail.**
+Roughly **10 minutes off the p99**, on a boot that otherwise takes over half
+an hour.
 
-The CPU-side metrics are highly reproducible (rho identical across baselines,
-run-queue wait within 1.2%). Pod-readiness tails are noisier — p90 varied 20%
-between the two baselines — so a conservative reading, comparing against the
-*better* baseline, still gives p50 -23% and p99 -27%.
+Read the tail figures with care: the CPU-side metrics are highly reproducible
+(rho identical across the two baselines, run-queue wait within ~1%), but
+pod-readiness tails varied up to 20% between baseline runs. Comparing against
+the *better* baseline still gives roughly -23% p50 and -27% p99.
 
-**Real workloads benefit roughly twice as much as synthetic ones** (-33% vs
--19% at comparable rho), presumably because real pods are far more expensive
-for kubelet and CRI-O to start, so more of the critical path is the platform
-CPU work the boost relieves.
+### Environment B -- lightweight pods, and where the rho threshold sits
 
-### The rho threshold, from lab A/B
-
-Measured on a lab SNO (288 CPUs, no SMT, 487 synthetic pods, identical
-procedure, varying only the reserved CPU count):
+A 288-CPU host with no SMT, ~490 lightweight pods (single container running
+`sleep`), identical procedure, varying only the reserved CPU count:
 
 | reserved CPUs | rho without boost | pods ready p99: without -> with boost | verdict |
 |---|---|---|---|
 | 8 | 0.77 | 224-229 s -> 234 s | no benefit, ~8-14% worse on p50 |
 | **4** | **0.91** | **282 s -> 228 s (-19%)** | **clear benefit** |
+
+Note the heavier CNF-like workload in environment A gained noticeably more at
+comparable rho (~-30% vs ~-19% on p99). Realistic pods are far more expensive
+for kubelet and CRI-O to start, so more of the critical path is platform CPU
+work -- which is exactly what the boost relieves.
 
 In the saturated case it is a good trade:
 
@@ -122,14 +124,14 @@ decide whether CPU is the problem will tell you it is not.
 
 - Validated on OCP 4.20 and 4.22 SNO with `cpuPartitioning: AllNodes` and a
   PerformanceProfile.
-- The rho-threshold A/B used a synthetic workload (one container running
-  `sleep`, no PVCs, probes or extra network attachments). The headline results
-  above are from a real CNF deployment, which benefited about twice as much.
-- In the validated run the boost was only **partially** applied: `kubelet` and
-  `crio` were widened but the control-plane static pods were not. Check
-  `journalctl -u platform-cpu-boost -b -o cat | grep applied` reports a
-  non-zero pod-cgroup count — if it says `0 pod cgroups`, there is more
-  benefit still on the table.
+- All results here come from synthetic workloads: environment B used
+  single-container `sleep` pods, environment A heavier CNF-like pods with
+  multiple containers, volumes and probes. Neither substitutes for measuring
+  your own deployment.
+- Always confirm the boost actually applied:
+  `journalctl -u platform-cpu-boost -b -o cat | grep applied` should report a
+  non-zero pod-cgroup count. If it says `0 pod cgroups`, only `system.slice`
+  was widened and there is more benefit on the table.
 - The workaround deliberately does **not** touch `ovs-vswitchd` or
   `ovsdb-server`; ovn-kubernetes manages those dynamically and interfering
   with them wedged ovsdb in testing.
