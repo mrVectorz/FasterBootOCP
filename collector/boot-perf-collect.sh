@@ -274,8 +274,13 @@ finish() {
   [[ -n "${SADC_PID:-}" ]] && kill "$SADC_PID" 2>/dev/null
   mkdir -p "$OUTDIR"
   # Journal for the boot: the authoritative pod-bringup timeline lives here.
+  # platform-cpu-boost is included so an A/B capture is self-documenting:
+  # without it there is no way to tell from the collection whether the boost
+  # ran, what set it applied, or whether it picked up the management pod
+  # cgroups. ovsdb-server and ovn* matter for CNI-side stalls.
   journalctl -b -o short-precise --no-pager \
-    -u crio -u kubelet -u ovs-vswitchd -u systemd-udevd -u NetworkManager \
+    -u crio -u kubelet -u ovs-vswitchd -u ovsdb-server -u systemd-udevd \
+    -u NetworkManager -u platform-cpu-boost \
     > "${RUNDIR}/journal-units.log" 2>&1
   journalctl -b -o short-precise --no-pager -k > "${RUNDIR}/journal-kernel.log" 2>&1
   systemd-analyze blame         > "${RUNDIR}/systemd-blame.txt"         2>&1
