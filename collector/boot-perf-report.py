@@ -218,6 +218,7 @@ def main(path):
     # ---- per-daemon CPU attribution ------------------------------------
     prev, tot, thr = {}, defaultdict(float), defaultdict(int)
     onres = defaultdict(int)   # samples seen running on a reserved CPU
+    cpus_allowed = {}          # authoritative affinity, last seen
     nsamp = defaultdict(int)
     first = lastt = None
     with opener(d, "slow.txt") as fh:
@@ -227,7 +228,8 @@ def main(path):
                 first = first or lastt
                 continue
             f = line.split()
-            if len(f) != 8 or not f[0].isdigit():
+            # 8 fields = older collections (no cpus_allowed); 9 = current.
+            if len(f) not in (8, 9) or not f[0].isdigit():
                 continue
             pid, comm = int(f[0]), f[1]
             try:
@@ -235,6 +237,7 @@ def main(path):
                 last_cpu = int(f[7])
             except ValueError:
                 continue
+            allowed = f[8] if len(f) == 9 else None
             if pid in prev and prev[pid][0] == comm:
                 dv = cpu - prev[pid][1]
                 if dv > 0:
@@ -242,24 +245,39 @@ def main(path):
                     nsamp[comm] += 1
                     if last_cpu in reserved:
                         onres[comm] += 1
+                    if allowed and allowed != "-":
+                        cpus_allowed[comm] = allowed
             prev[pid] = (comm, cpu)
             thr[comm] = max(thr[comm], int(f[5]))
     span = (lastt - first) if first and lastt and lastt > first else 0
     if span:
         print(f"\n--- CPU attribution over {span:.0f} s "
               f"(utime+stime deltas, all PIDs) ---")
-        # "on res" is the fraction of samples where the process was last seen
-        # running on a reserved CPU. Anything near 0% is NOT competing for the
-        # platform pool, so its "%of pool" is meaningless -- the collector
-        # itself and any isolated-pool workload fall in this bucket.
-        print(f"  {'command':<24} {'cpu-s':>9} {'CPUs':>7} {'%of pool':>9} "
-              f"{'on res':>7} {'max thr':>8}")
+        # "cpus_allowed" is the process's actual affinity mask, read from
+        # /proc/<pid>/status -- authoritative, and the right way to tell
+        # whether a process is confined to the reserved pool.
+        #
+        # The old "on res" column derived this from last_cpu and was wrong.
+        # last_cpu is the THREAD-GROUP LEADER's CPU; for a multi-threaded Go
+        # process that is usually a parked main thread. Measured on a real
+        # capture: kube-apiserver reported last_cpu=0 on 131 of 131 samples
+        # while 10-12 worker threads did the work elsewhere, which read as
+        # "100% on the reserved pool" and was meaningless.
+        have_allowed = bool(cpus_allowed)
+        hdr = 'cpus_allowed (authoritative)' if have_allowed else 'on res (UNRELIABLE)'
+        print(f"  {'command':<22} {'cpu-s':>9} {'CPUs':>7} {'%of pool':>9} "
+              f"{'thr':>5}  {hdr}")
         for c, v in sorted(tot.items(), key=lambda x: -x[1])[:25]:
-            frac = (onres[c] / nsamp[c] * 100) if nsamp[c] else 0.0
-            flag = "" if frac >= 50 else "   <- not on reserved pool"
-            print(f"  {c[:24]:<24} {v:9.1f} {v/span:7.2f} "
-                  f"{v/span/len(reserved)*100:8.1f}% {frac:6.0f}% "
-                  f"{thr[c]:8d}{flag}")
+            if have_allowed:
+                col = cpus_allowed.get(c, "?")
+                conf = "" if col == "?" else (
+                    "  <- confined to reserved"
+                    if expand(col) and expand(col) <= reserved else "")
+            else:
+                frac = (onres[c] / nsamp[c] * 100) if nsamp[c] else 0.0
+                col, conf = f"{frac:.0f}%", "   (last_cpu-derived; do not trust)"
+            print(f"  {c[:22]:<22} {v:9.1f} {v/span:7.2f} "
+                  f"{v/span/len(reserved)*100:8.1f}% {thr[c]:5d}  {col}{conf}")
 
 
 if __name__ == "__main__":

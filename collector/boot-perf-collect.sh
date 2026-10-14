@@ -79,6 +79,17 @@ if [[ -n "${COLLECTOR_CPUS:-}" ]]; then
     && echo "collector pinned to CPUs ${COLLECTOR_CPUS}" >&2
 fi
 renice -n 10 -p $$ >/dev/null 2>&1
+# Also confine the whole slice. taskset only sets the calling process's mask;
+# measured on a customer node, the two worker subshells ended up with a mask
+# of reserved + {78,79} while the main process stayed correctly on {78,79},
+# so they sampled from the very pool the collector exists not to disturb.
+# A cgroup cpuset is inherited by every descendant and cannot drift that way.
+# (The exact mechanism of the drift is still unexplained; this closes it
+# regardless.)
+if [[ -n "${COLLECTOR_CPUS:-}" ]]; then
+  systemctl set-property --runtime "$(systemctl show -p Slice --value "$(systemctl show -p Id --value boot-perf-collect.service 2>/dev/null)" 2>/dev/null || echo boot-perf.slice)" \
+    "AllowedCPUs=${COLLECTOR_CPUS}" >/dev/null 2>&1 || true
+fi
 # Record the affinity actually in force, read back from the kernel. Reporting
 # the requested value instead would claim success even when taskset failed --
 # and "the collector is not on the reserved pool" is the property the whole
@@ -97,7 +108,10 @@ COLLECTOR_CPUS_ACTUAL="$(awk '/Cpus_allowed_list/{print $2}' "/proc/$$/status" 2
   echo "### isolated"; cat /sys/devices/system/cpu/isolated 2>/dev/null
   echo "### nohz_full"; cat /sys/devices/system/cpu/nohz_full 2>/dev/null
   echo "### collector requested CPUs: ${COLLECTOR_CPUS:-<none>}"
-  echo "### collector ACTUAL Cpus_allowed_list: ${COLLECTOR_CPUS_ACTUAL:-<unknown>}"
+  echo "### collector ACTUAL Cpus_allowed_list (main): ${COLLECTOR_CPUS_ACTUAL:-<unknown>}"
+  echo "### NOTE: worker PIDs are audited again in slow.txt (Cpus_allowed per"
+  echo "###       process); checking only the main PID previously reported a"
+  echo "###       guarantee the workers did not actually have."
   echo "### reserved set (for comparison): $(tr ' ' '\n' < /proc/cmdline | sed -n 's/^systemd.cpu_affinity=//p')"
   echo "### PSI available: $([[ -r /proc/pressure/cpu ]] && echo yes || echo 'NO (psi=0 on cmdline?)')"
   echo "### schedstat: $(head -1 /proc/schedstat 2>/dev/null)"
@@ -236,8 +250,8 @@ slow() {
       # Cumulative per-process CPU time. utime+stime deltas across samples give
       # exact attribution -- unlike top's first-iteration %CPU, which is
       # averaged over the process lifetime and badly misleading at boot.
-      echo "--- procs (pid comm state utime stime nthreads rss last_cpu)"
-      local pid
+      echo "--- procs (pid comm state utime stime nthreads rss last_cpu cpus_allowed)"
+      local pid allowed k v
       for s in /proc/[0-9]*/stat; do
         read -r line < "$s" 2>/dev/null || continue
         pid="${s#/proc/}"; pid="${pid%/stat}"
@@ -249,9 +263,19 @@ slow() {
         # f[0] is proc(5) field 3 (state), so f[i] == field (i+3):
         #   utime=14->f[11]  stime=15->f[12]  num_threads=20->f[17]
         #   rss=24->f[21]    processor=39->f[36]
-        printf '%s %s %s %s %s %s %s %s\n' \
+        # Cpus_allowed_list is the AUTHORITATIVE affinity. The last_cpu field
+        # that used to be the only CPU signal here is the thread-group
+        # leader's, which for a multi-threaded Go process is usually a parked
+        # main thread -- measured: kube-apiserver showed last_cpu=0 on 131 of
+        # 131 samples while 10-12 worker threads did the actual work
+        # elsewhere. Reading it as "where this process ran" was wrong.
+        allowed="-"
+        while read -r k v; do
+          [[ "$k" == "Cpus_allowed_list:" ]] && { allowed="$v"; break; }
+        done < "/proc/$pid/status" 2>/dev/null
+        printf '%s %s %s %s %s %s %s %s %s\n' \
           "$pid" "$comm" "${f[0]}" "${f[11]}" "${f[12]}" \
-          "${f[17]}" "${f[21]}" "${f[36]}"
+          "${f[17]}" "${f[21]}" "${f[36]}" "${allowed:--}"
       done
       echo "--- crictl"
       timeout 10 crictl --runtime-endpoint unix:///var/run/crio/crio.sock \

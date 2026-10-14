@@ -91,6 +91,7 @@ STATE_FILE=/var/lib/kubelet/cpu_manager_state
 RUNSTATE=/run/platform-cpu-boost.state
 NORM_TARGET=""   # kernel-normalised spelling of the active target, learned lazily
 NORM_FOR=""      # which target NORM_TARGET corresponds to
+declare -A SEEN_SKIP   # cpuset spellings already known to be ineligible
 
 MAX_PLATFORM_CPUS="${MAX_PLATFORM_CPUS:-32}"   # see GOTCHA 1; do not exceed 32
 POLL_SEC="${POLL_SEC:-2}"                      # see GOTCHA 2; lower = safer
@@ -210,6 +211,16 @@ apply_set() { # apply_set <cpuset>
   # Invalidate the learned normalisation if the target changed.
   [[ "$NORM_FOR" == "$target" ]] || { NORM_FOR="$target"; NORM_TARGET=""; }
 
+  # Normalise the two reference sets ONCE per pass (2 subshells total) so the
+  # per-file loop below can decide almost everything with plain string
+  # compares. Previously only files already AT the target were fast-pathed;
+  # every other file -- CPU Manager exclusive cpusets, the besteffort pool,
+  # parent slices -- paid two subshells on EVERY pass. On a node with ~1000
+  # multi-container pods that measured 13min 52s of CPU over a 20min boost.
+  local NORM_RES NORM_PREV
+  NORM_RES="$(expand "$RESERVED" | tr '\n' ' ')"
+  NORM_PREV="$(expand "$prev" | tr '\n' ' ')"
+
   while IFS= read -r f; do
     # Braces around the redirection: `read -r cur < "$f" 2>/dev/null` applies
     # redirections LEFT TO RIGHT, so a missing file is reported to the still
@@ -227,7 +238,20 @@ apply_set() { # apply_set <cpuset>
     # boost window, nearly a full core.
     [[ -n "$NORM_TARGET" && "$cur" == "$NORM_TARGET" ]] && continue
 
-    if same_set "$cur" "$RESERVED" || same_set "$cur" "$prev"; then
+    # Cheap string compares against the kernel-normalised spellings we have
+    # already seen, before paying for a set comparison.
+    if [[ "$cur" == "$RESERVED" || "$cur" == "$prev" ]]; then
+      :                                   # definitely eligible
+    elif [[ -n "${SEEN_SKIP[$cur]:-}" ]]; then
+      continue                            # known-ineligible spelling
+    elif same_set "$cur" "$RESERVED" || same_set "$cur" "$prev"; then
+      :                                   # eligible, unusual spelling
+    else
+      SEEN_SKIP[$cur]=1                   # remember so we never re-expand it
+      continue
+    fi
+
+    if true; then
       if { echo "$target" > "$f"; } 2>/dev/null; then
         ((n++))
         # Learn the kernel's normalised spelling from the first write.
