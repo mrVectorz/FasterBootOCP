@@ -13,8 +13,8 @@
 #
 # ovn-kubernetes solves this exact problem for ovs-vswitchd: it asks the
 # kubelet for "all the CPUs which are not affine to guaranteed workloads" and
-# pins OVS there, re-evaluating whenever that set changes. This applies the
-# same idea to the rest of
+# pins OVS there, re-evaluating whenever that set changes
+# (openshift/ovn-kubernetes#3390). This applies the same idea to the rest of
 # the control plane, which has no such mechanism.
 #
 # SOURCE OF TRUTH: /var/lib/kubelet/cpu_manager_state
